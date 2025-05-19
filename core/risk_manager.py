@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import logging
 from datetime import datetime, timedelta
 from config.config import (
@@ -19,43 +19,51 @@ class RiskManager:
         self.current_drawdown = 0.0
         self.peak_balance = 0.0
         self.open_positions = []
+        self.volatility_limits = {}  # Store volatility limits per symbol
+        self.correlation_matrix = pd.DataFrame()  # Store correlation between symbols
+        self.market_regime = 'normal'  # Can be 'normal', 'volatile', 'trending'
+        self.risk_multiplier = 1.0  # Adjust risk based on market conditions
 
     def can_open_position(
         self,
         symbol: str,
         strategy: str,
         account_balance: float,
-        current_equity: float
-    ) -> bool:
-        """Check if a new position can be opened based on risk management rules."""
+        current_equity: float,
+        market_data: pd.DataFrame
+    ) -> Tuple[bool, str]:
+        """Enhanced check for opening new positions with detailed reasoning."""
         # Reset daily trade counter if it's a new day
         self._reset_daily_trades_if_needed()
         
-        # Check if we've reached the daily trade limit
+        # Basic checks
         if self.daily_trades >= MAX_DAILY_TRADES:
-            self.logger.warning("Daily trade limit reached")
-            return False
+            return False, "Daily trade limit reached"
         
-        # Check if we've reached the maximum number of open positions
         if len(self.open_positions) >= MAX_OPEN_POSITIONS:
-            self.logger.warning("Maximum number of open positions reached")
-            return False
+            return False, "Maximum number of open positions reached"
         
-        # Check if we're already trading this symbol
         if any(pos['symbol'] == symbol for pos in self.open_positions):
-            self.logger.warning(f"Already have an open position for {symbol}")
-            return False
+            return False, f"Already have an open position for {symbol}"
         
         # Update peak balance and calculate drawdown
         self.peak_balance = max(self.peak_balance, current_equity)
         self.current_drawdown = (self.peak_balance - current_equity) / self.peak_balance
         
-        # Check if we've exceeded maximum drawdown
         if self.current_drawdown > MAX_DRAWDOWN:
-            self.logger.warning(f"Maximum drawdown exceeded: {self.current_drawdown:.2%}")
-            return False
+            return False, f"Maximum drawdown exceeded: {self.current_drawdown:.2%}"
         
-        return True
+        # Advanced checks
+        if not self._check_volatility(symbol, market_data):
+            return False, "Current volatility exceeds limits"
+        
+        if not self._check_correlation(symbol):
+            return False, "High correlation with existing positions"
+        
+        if not self._check_market_regime(symbol, market_data):
+            return False, "Unfavorable market regime"
+        
+        return True, "Position can be opened"
 
     def calculate_position_size(
         self,
@@ -63,11 +71,19 @@ class RiskManager:
         entry_price: float,
         stop_loss: float,
         account_balance: float,
+        market_data: pd.DataFrame,
         risk_per_trade: float = RISK_PER_TRADE
     ) -> float:
-        """Calculate position size based on risk management rules."""
-        # Calculate risk amount in account currency
-        risk_amount = account_balance * risk_per_trade
+        """Enhanced position sizing with dynamic risk adjustment."""
+        # Calculate base risk amount
+        base_risk_amount = account_balance * risk_per_trade
+        
+        # Adjust risk based on market regime
+        adjusted_risk = base_risk_amount * self.risk_multiplier
+        
+        # Adjust for volatility
+        volatility_factor = self._calculate_volatility_factor(symbol, market_data)
+        adjusted_risk *= volatility_factor
         
         # Calculate price difference between entry and stop loss
         price_diff = abs(entry_price - stop_loss)
@@ -76,38 +92,188 @@ class RiskManager:
             return 0.0
         
         # Calculate position size
-        position_size = risk_amount / price_diff
+        position_size = adjusted_risk / price_diff
         
-        # Round position size to appropriate lot size
-        position_size = round(position_size, 2)
+        # Apply position size limits
+        position_size = self._apply_position_limits(position_size, symbol)
         
-        return position_size
+        return round(position_size, 2)
 
     def calculate_stop_loss(
         self,
         symbol: str,
         entry_price: float,
-        atr: float,
+        market_data: pd.DataFrame,
         atr_multiplier: float = 2.0
     ) -> float:
-        """Calculate stop loss level using ATR."""
-        return round(entry_price - (atr * atr_multiplier), 5)
+        """Enhanced stop loss calculation using multiple methods."""
+        # Calculate ATR
+        atr = self._calculate_atr(market_data)
+        
+        # Calculate volatility-based stop
+        volatility_stop = self._calculate_volatility_stop(symbol, market_data)
+        
+        # Calculate support/resistance levels
+        support_level = self._find_nearest_support(entry_price, market_data)
+        
+        # Use the most conservative stop loss
+        stops = [
+            entry_price - (atr * atr_multiplier),  # ATR-based
+            volatility_stop,  # Volatility-based
+            support_level  # Support-based
+        ]
+        
+        return round(max(stops), 5)
 
     def calculate_take_profit(
         self,
         symbol: str,
         entry_price: float,
         stop_loss: float,
+        market_data: pd.DataFrame,
         risk_reward_ratio: float = 2.0
     ) -> float:
-        """Calculate take profit level based on risk-reward ratio."""
-        # Calculate the distance to stop loss
+        """Enhanced take profit calculation using multiple methods."""
+        # Calculate base take profit
         sl_distance = abs(entry_price - stop_loss)
+        base_tp = entry_price + (sl_distance * risk_reward_ratio)
         
-        # Calculate take profit
-        take_profit = entry_price + (sl_distance * risk_reward_ratio)
+        # Calculate resistance-based take profit
+        resistance_level = self._find_nearest_resistance(entry_price, market_data)
         
-        return round(take_profit, 5)
+        # Calculate volatility-based take profit
+        volatility_tp = self._calculate_volatility_tp(symbol, market_data, entry_price)
+        
+        # Use the most conservative take profit
+        take_profits = [
+            base_tp,
+            resistance_level,
+            volatility_tp
+        ]
+        
+        return round(min(take_profits), 5)
+
+    def update_market_conditions(self, market_data: Dict[str, pd.DataFrame]) -> None:
+        """Update market conditions and adjust risk parameters."""
+        self._update_volatility_limits(market_data)
+        self._update_correlation_matrix(market_data)
+        self._update_market_regime(market_data)
+        self._adjust_risk_multiplier()
+
+    def _check_volatility(self, symbol: str, market_data: pd.DataFrame) -> bool:
+        """Check if current volatility is within acceptable limits."""
+        current_volatility = self._calculate_volatility(symbol, market_data)
+        return current_volatility <= self.volatility_limits.get(symbol, float('inf'))
+
+    def _check_correlation(self, symbol: str) -> bool:
+        """Check correlation with existing positions."""
+        if self.correlation_matrix.empty:
+            return True
+        
+        for position in self.open_positions:
+            if self.correlation_matrix.loc[symbol, position['symbol']] > 0.7:
+                return False
+        return True
+
+    def _check_market_regime(self, symbol: str, market_data: pd.DataFrame) -> bool:
+        """Check if current market regime is suitable for trading."""
+        if self.market_regime == 'volatile':
+            return False  # Don't trade in highly volatile markets
+        return True
+
+    def _calculate_volatility_factor(self, symbol: str, market_data: pd.DataFrame) -> float:
+        """Calculate volatility adjustment factor for position sizing."""
+        current_volatility = self._calculate_volatility(symbol, market_data)
+        historical_volatility = self._calculate_historical_volatility(symbol, market_data)
+        
+        if historical_volatility == 0:
+            return 1.0
+        
+        ratio = current_volatility / historical_volatility
+        return max(0.5, min(1.0, 1.0 / ratio))
+
+    def _apply_position_limits(self, position_size: float, symbol: str) -> float:
+        """Apply position size limits based on symbol and account size."""
+        # Get symbol info
+        symbol_info = self._get_symbol_info(symbol)
+        
+        # Apply minimum and maximum position size limits
+        position_size = max(symbol_info['min_lot'], position_size)
+        position_size = min(symbol_info['max_lot'], position_size)
+        
+        return position_size
+
+    def _calculate_atr(self, market_data: pd.DataFrame, period: int = 14) -> float:
+        """Calculate Average True Range."""
+        high = market_data['high']
+        low = market_data['low']
+        close = market_data['close']
+        
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        return tr.rolling(period).mean().iloc[-1]
+
+    def _calculate_volatility(self, symbol: str, market_data: pd.DataFrame) -> float:
+        """Calculate current volatility."""
+        returns = market_data['close'].pct_change()
+        return returns.std() * np.sqrt(252)  # Annualized volatility
+
+    def _calculate_historical_volatility(self, symbol: str, market_data: pd.DataFrame) -> float:
+        """Calculate historical volatility."""
+        returns = market_data['close'].pct_change()
+        return returns.std() * np.sqrt(252)  # Annualized volatility
+
+    def _find_nearest_support(self, price: float, market_data: pd.DataFrame) -> float:
+        """Find nearest support level."""
+        # Simple implementation - can be enhanced with more sophisticated methods
+        return market_data['low'].rolling(20).min().iloc[-1]
+
+    def _find_nearest_resistance(self, price: float, market_data: pd.DataFrame) -> float:
+        """Find nearest resistance level."""
+        # Simple implementation - can be enhanced with more sophisticated methods
+        return market_data['high'].rolling(20).max().iloc[-1]
+
+    def _update_volatility_limits(self, market_data: Dict[str, pd.DataFrame]) -> None:
+        """Update volatility limits for each symbol."""
+        for symbol, data in market_data.items():
+            self.volatility_limits[symbol] = self._calculate_historical_volatility(symbol, data) * 1.5
+
+    def _update_correlation_matrix(self, market_data: Dict[str, pd.DataFrame]) -> None:
+        """Update correlation matrix between symbols."""
+        returns = pd.DataFrame()
+        for symbol, data in market_data.items():
+            returns[symbol] = data['close'].pct_change()
+        
+        self.correlation_matrix = returns.corr()
+
+    def _update_market_regime(self, market_data: Dict[str, pd.DataFrame]) -> None:
+        """Update market regime based on volatility and trend."""
+        # Simple implementation - can be enhanced with more sophisticated methods
+        volatility = self._calculate_volatility('EURUSD', market_data['EURUSD'])
+        if volatility > 0.2:  # 20% annualized volatility
+            self.market_regime = 'volatile'
+        else:
+            self.market_regime = 'normal'
+
+    def _adjust_risk_multiplier(self) -> None:
+        """Adjust risk multiplier based on market conditions."""
+        if self.market_regime == 'volatile':
+            self.risk_multiplier = 0.5
+        else:
+            self.risk_multiplier = 1.0
+
+    def _get_symbol_info(self, symbol: str) -> Dict:
+        """Get symbol information including lot size limits."""
+        # This should be implemented to get actual symbol information from MT5
+        return {
+            'min_lot': 0.01,
+            'max_lot': 100.0,
+            'point': 0.00001,
+            'digits': 5
+        }
 
     def update_position(
         self,
