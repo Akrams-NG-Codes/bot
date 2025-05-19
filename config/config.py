@@ -5,9 +5,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # MetaTrader 5 Configuration
-MT5_LOGIN = int(os.getenv('MT5_LOGIN', '0'))
-MT5_PASSWORD = os.getenv('MT5_PASSWORD', '')
-MT5_SERVER = os.getenv('MT5_SERVER', '')
+MT5_LOGIN = os.getenv('MT5_LOGIN')
+MT5_PASSWORD = os.getenv('MT5_PASSWORD')
+MT5_SERVER = os.getenv('MT5_SERVER')
 MT5_TIMEOUT = int(os.getenv('MT5_TIMEOUT', '60000'))
 
 # Trading Configuration
@@ -52,31 +52,58 @@ STRATEGIES = {
 
 # Machine Learning Configuration
 ML_CONFIG = {
-    'retrain_interval': int(os.getenv('ML_RETRAIN_INTERVAL', '24')),  # hours
-    'min_samples': int(os.getenv('ML_MIN_SAMPLES', '1000')),
-    'n_clusters': int(os.getenv('ML_N_CLUSTERS', '5')),
-    'model_path': os.getenv('ML_MODEL_PATH', 'models/')
+    'model_path': 'models',
+    'retrain_interval': 24,  # hours
+    'min_training_samples': 1000,
+    'prediction_threshold': 0.7
 }
 
 # Notification Configuration
 EMAIL_CONFIG = {
-    'smtp_server': os.getenv('SMTP_SERVER', ''),
-    'smtp_port': int(os.getenv('SMTP_PORT', '587')),
-    'smtp_username': os.getenv('SMTP_USERNAME', ''),
-    'smtp_password': os.getenv('SMTP_PASSWORD', ''),
-    'recipient_email': os.getenv('RECIPIENT_EMAIL', '')
+    'enabled': False,
+    'sender': os.getenv('EMAIL_SENDER'),
+    'password': os.getenv('EMAIL_PASSWORD'),
+    'recipient': os.getenv('EMAIL_RECIPIENT'),
+    'smtp_server': 'smtp.gmail.com',
+    'smtp_port': 587
 }
 
 TELEGRAM_CONFIG = {
-    'bot_token': os.getenv('TELEGRAM_BOT_TOKEN', ''),
-    'chat_id': os.getenv('TELEGRAM_CHAT_ID', '')
+    'enabled': False,
+    'bot_token': os.getenv('TELEGRAM_BOT_TOKEN'),
+    'chat_id': os.getenv('TELEGRAM_CHAT_ID')
 }
 
 # Logging Configuration
 LOG_CONFIG = {
-    'level': os.getenv('LOG_LEVEL', 'INFO'),
-    'format': '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    'file': os.getenv('LOG_FILE', 'logs/akrams_ng.log')
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'standard': {
+            'format': '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+        },
+    },
+    'handlers': {
+        'default': {
+            'level': 'INFO',
+            'formatter': 'standard',
+            'class': 'logging.StreamHandler',
+        },
+        'file': {
+            'level': 'INFO',
+            'formatter': 'standard',
+            'class': 'logging.FileHandler',
+            'filename': 'logs/trading_bot.log',
+            'mode': 'a',
+        },
+    },
+    'loggers': {
+        '': {
+            'handlers': ['default', 'file'],
+            'level': 'INFO',
+            'propagate': True
+        }
+    }
 }
 
 # MongoDB Configuration (for logging)
